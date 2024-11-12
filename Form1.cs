@@ -31,12 +31,13 @@ namespace WebSiteDownload
 
             try
             {
+                int htmlLoadTimeout = 3 * 1000;
                 // async load html from web url
                 CancellationTokenSource cts = new();
                 var htmlLoadTask = htmlWeb.LoadFromWebAsync(textBox1.Text, cts.Token);
 
                 // async wait html load task, cancel task when timeout
-                if (await Task.WhenAny(htmlLoadTask, Task.Delay(3000)) != htmlLoadTask)
+                if (await Task.WhenAny(htmlLoadTask, Task.Delay(htmlLoadTimeout)) != htmlLoadTask)
                 {
                     // timeout logic
                     cts.Cancel();
@@ -90,18 +91,12 @@ namespace WebSiteDownload
         }
 
 
-        public static async Task DownloadFileAsync(HttpClient client, String url, string filePath, CancellationToken token)
+        public static async Task DownloadFileAsync(HttpClient client, string url, FileStream fileStream, CancellationToken token)
         {
-            if (string.IsNullOrEmpty(url) || string.IsNullOrEmpty(filePath)) { return; }
+            if (string.IsNullOrEmpty(url)) { return; }
 
-            if (!File.Exists(filePath))
-            {
-                using var httpStream = await client.GetStreamAsync(url, token);
-                var linkedToken = CancellationTokenSource.CreateLinkedTokenSource(token).Token;
-                using var fileStream = new FileStream(filePath, FileMode.CreateNew);
-                await httpStream.CopyToAsync(fileStream, linkedToken);
-            }
-            ZipFile.ExtractToDirectory(filePath, Path.GetDirectoryName(filePath) ?? "", true);
+            using var httpStream = await client.GetStreamAsync(url, token);
+            await httpStream.CopyToAsync(fileStream, token);
         }
 
         private void DisableButtons()
@@ -134,45 +129,65 @@ namespace WebSiteDownload
                 if (string.IsNullOrEmpty(folderPath)) { throw new Exception("[ERROR] Invalid selected folder path."); }
 
                 // init http client
-                int httpTimeout = 10000;
+                int httpTimeout = 20 * 1000;
                 string urlPrefix = @"http://data.gdeltproject.org/events";
                 HttpClient httpClient = new() { Timeout = TimeSpan.FromMilliseconds(httpTimeout) };
 
                 // copy checked file list into stack
-                int downloadFileCount = 0;
                 var checkedFileList = checkedListBox1.CheckedItems;
-                var downloadFileStack = new Stack<(int, string)>();
                 int fileCount = checkedFileList.Count;
-                for (int i = fileCount - 1; i >= 0; i--) downloadFileStack.Push((i, checkedFileList[i]?.ToString() ?? ""));
+                // use a new list to store file name
+                // when check list box is checked or unchecked the checked item list is changed
+                var downloadFileList = new List<string>();
+                for (int i = 0; i < fileCount; i++) downloadFileList.Add(checkedFileList[i]?.ToString() ?? "");
 
-                // loop pop stack, download file into local terminal
-                int maxRepeatCount = fileCount;
+                int downloadFileCount = 0;
                 // mark check list box to be uncheckable
                 checkedListBox1.SelectionMode = SelectionMode.None;
-                while (downloadFileStack.TryPop(out (int, string) downloadItem))
+                for (int i = 0; i < fileCount; i++)
                 {
-                    if (maxRepeatCount <= 0) { break; }
+                    var fileName = downloadFileList[i];
+                    ShowInfoInForm($"[INFO] Downloading files {i + 1}/{fileCount} ...");
 
-                    var index = downloadItem.Item1;
-                    var fileName = downloadItem.Item2;
+                    // !!! FUCK C# using statement, may not dispose in a Task when exception occur
+                    // 1. if file exists then continue
+                    // 2. delete the bak file
+                    // 3. create file stream of bak file
+                    // 4. read stream of http client and write into file stream
+                    // 5. dispose and close file stream
+                    // 6. mv bak file to origin file and unzip if download success
+                    // 7. download again if failed
                     if (string.IsNullOrEmpty(fileName)) { continue; }
-
-                    ShowInfoInForm($"[INFO] Downloading files {index + 1}/{fileCount} ...");
-                    CancellationTokenSource cts = new();
-                    var downloadTask = DownloadFileAsync(httpClient, $"{urlPrefix}/{fileName}", $"{folderPath}\\{fileName}", cts.Token);
-                    if (await Task.WhenAny(downloadTask, Task.Delay(httpTimeout)) != downloadTask) { cts.Cancel(); }
-
-                    // success download file
-                    if (downloadTask.Status == TaskStatus.RanToCompletion)
+                    var filePath = $"{folderPath}\\{fileName}";
+                    if (File.Exists(filePath))
                     {
                         downloadFileCount++;
-                        checkedListBox1.SetItemChecked(index, false);
+                        checkedListBox1.SetItemChecked(i, false);
                         continue;
                     }
 
-                    // something wrong, repeat downloading
-                    downloadFileStack.Push(downloadItem);
-                    maxRepeatCount--;
+                    for (int repeatCount = 0; repeatCount < AppUtil.MAX_RETRY; repeatCount++)
+                    {
+                        try { File.Delete($"{filePath}.bak"); } catch { }
+                        using var fileStream = new FileStream($"{filePath}.bak", FileMode.CreateNew);
+
+                        CancellationTokenSource cts = new();
+                        var downloadTask = DownloadFileAsync(httpClient, $"{urlPrefix}/{fileName}", fileStream, cts.Token);
+                        if (await Task.WhenAny(downloadTask, Task.Delay(httpTimeout)) != downloadTask) { cts.Cancel(); }
+
+                        // success download file
+                        if (downloadTask.Status == TaskStatus.RanToCompletion)
+                        {
+                            File.Move($"{filePath}.bak", filePath, true);
+                            ZipFile.ExtractToDirectory(filePath, Path.GetDirectoryName(filePath) ?? "", true);
+
+                            downloadFileCount++;
+                            checkedListBox1.SetItemChecked(i, false);
+                            break;
+                        }
+                        if (downloadTask.Exception != null) { ShowInfoInForm($"[ERROR] {downloadTask.Exception.Message}"); }
+                        ShowInfoInForm($"[INFO] Retry downloading files {i + 1}/{fileCount} ...");
+                    }
                 }
                 ShowInfoInForm($"[INFO] Finish downloading files {downloadFileCount}/{fileCount}.");
             }
@@ -219,17 +234,17 @@ namespace WebSiteDownload
             }
         }
 
-        private static void MergeFileList(string[] inputFileList, string outputFilePath)
-        {
-            if (File.Exists(outputFilePath)) { File.Move(outputFilePath, $"{outputFilePath}.bak", true); }
+        //private static void MergeFileList(string[] inputFileList, string outputFilePath)
+        //{
+        //    if (File.Exists(outputFilePath)) { File.Move(outputFilePath, $"{outputFilePath}.bak", true); }
 
-            using var outputStream = new FileStream(outputFilePath, FileMode.CreateNew);
-            foreach (var inputFilePath in inputFileList)
-            {
-                using var inputStream = new FileStream(inputFilePath, FileMode.Open);
-                inputStream.CopyTo(outputStream);
-            }
-        }
+        //    using var outputStream = new FileStream(outputFilePath, FileMode.CreateNew);
+        //    foreach (var inputFilePath in inputFileList)
+        //    {
+        //        using var inputStream = new FileStream(inputFilePath, FileMode.Open);
+        //        inputStream.CopyTo(outputStream);
+        //    }
+        //}
 
         private void Form1_Load(object sender, EventArgs e)
         {
@@ -238,8 +253,9 @@ namespace WebSiteDownload
 
         private void ShowInfoInForm(string info)
         {
-            if (!string.IsNullOrEmpty(this.notifyContext.NotifyInfo)) { this.notifyContext.NotifyInfo += "\r\n"; }
-            this.notifyContext.NotifyInfo += info;
+            DateTime now = DateTime.Now;
+            info = $"[{now:yyyy-MM-dd HH:mm:ss}] {info}";
+            this.notifyContext.NotifyInfo = info + "\r\n" + this.notifyContext.NotifyInfo;
         }
         private void ClearForm()
         {
@@ -259,61 +275,91 @@ namespace WebSiteDownload
                 if (folderDialog.ShowDialog() == DialogResult.OK) { folderPath = folderDialog.SelectedPath; }
                 if (string.IsNullOrEmpty(folderPath)) { throw new Exception("[ERROR] Invalid selected folder path."); }
 
-                // start to go through csv files and merge them
-                Dictionary<string, ArrayList> yearFileListDict = [];
-                string filePat = @"^[0-9]+\S+$";
+                List<string> fileList = [];
+                string filePat = @"^[0-9]{4}\S+$";
                 var fileReg = new Regex(filePat);
                 foreach (var filePath in Directory.GetFiles(folderPath, "*.csv"))
                 {
-                    var fileName = Path.GetFileName(filePath).Split(".")[0];
-                    if (fileName.Length <= 4 || !fileReg.Match(fileName).Success) { continue; }
-                    string yearStr = fileName[0..4];
-                    if (yearFileListDict.TryGetValue(yearStr, out ArrayList? fileList)) { fileList.Add(filePath); }
-                    else yearFileListDict.Add(yearStr, [filePath]);
+                    var fileName = Path.GetFileName(filePath);
+                    if (!fileReg.Match(fileName).Success) { continue; }
+                    fileList.Add(filePath);
                 }
 
-                // merge files
-                foreach (KeyValuePair<string, ArrayList> item in yearFileListDict)
+                int fileProcessTimeout = 10 * 1000;
+                CancellationTokenSource cts = new();
+                var loadDataTask = AppUtil.LoadDataFromFile(folderPath, cts.Token);
+                if (await Task.WhenAny(loadDataTask, Task.Delay(fileProcessTimeout)) != loadDataTask)
                 {
-                    var fileList = item.Value.ToArray(typeof(string));
-                    ShowInfoInForm($"[INFO] Merge {fileList.Length} files into {item.Key}.csv file");
-                    MergeFileList((string[])fileList, $"{folderPath}\\{item.Key}.csv");
+                    cts.Cancel();
+                    ShowInfoInForm($"[ERROR] Timeout while loading middle data from file.");
                 }
+                if (loadDataTask.Exception != null)
+                {
+                    AppUtil.ClearMiddleData(folderPath);
+                    throw loadDataTask.Exception;
+                }
+                ShowInfoInForm($"[INFO] Finish loading middle data from file.");
 
-                // handle tsv file
-                var cntDict = AppUtil.GetGDELTEventResultDict(GDELTEventType.CNT);
-                var geoDict = AppUtil.GetGDELTEventResultDict(GDELTEventType.GEO);
+                var cntDict = AppUtil.CntDict;
+                var geoDict = AppUtil.GeoDict;
+                var recordFiles = AppUtil.RecordedFileList;
                 var csvReaderConfig = CsvConfiguration.FromAttributes<GDELTEvent>(CultureInfo.InvariantCulture);
                 {
-                    foreach (var year in yearFileListDict.Keys)
+                    foreach (var filePath in fileList)
                     {
-                        ShowInfoInForm($"[INFO] Start to read records from {year}.csv file.");
+                        var fileName = Path.GetFileName(filePath);
+                        if (recordFiles.Contains(fileName))
+                        {
+                            continue;
+                        }
 
-                        using var csvFileReader = new StreamReader($"{folderPath}\\{year}.csv");
+                        ShowInfoInForm($"[INFO] Start to read records from {fileName} file.");
+
+                        using var csvFileReader = new StreamReader($"{filePath}");
                         using var csvReader = new CsvReader(csvFileReader, csvReaderConfig);
+                        var tmpCntDict = new Dictionary<string, GDELTEventResult>();
+                        var tmpGeoDict = new Dictionary<string, GDELTEventResult>();
 
-                        int readRecordsTimeout = 60000;
-                        CancellationTokenSource cts = new();
+                        cts = new();
                         var readRecordsTask = Task.Run(async () =>
                         {
                             await foreach (var item in csvReader.GetRecordsAsync<GDELTEvent>())
                             {
-                                ProcessRecords(item, ref cntDict, GDELTEventType.CNT, item.Year);
-                                ProcessRecords(item, ref geoDict, GDELTEventType.GEO, item.Year);
+                                ProcessRecords(item, ref tmpCntDict, GDELTEventType.CNT, item.Year);
+                                ProcessRecords(item, ref tmpGeoDict, GDELTEventType.GEO, item.Year);
                             }
                         }, cts.Token);
 
-                        if (await Task.WhenAny(readRecordsTask, Task.Delay(readRecordsTimeout)) != readRecordsTask)
+                        if (await Task.WhenAny(readRecordsTask, Task.Delay(fileProcessTimeout)) != readRecordsTask)
                         {
                             cts.Cancel();
-                            throw new Exception($"[ERROR] Timeout while reading and processing {year}.csv file.");
+                            throw new Exception($"[ERROR] Timeout while reading and processing {fileName} file.");
                         }
 
                         if (readRecordsTask.Exception != null) { throw readRecordsTask.Exception; }
 
-                        ShowInfoInForm($"[INFO] Finish reading records from {year}.csv file.");
+                        if (readRecordsTask.Status == TaskStatus.RanToCompletion)
+                        {
+                            // finish reading and processing
+                            // update file records, cnt event result, geo event result
+                            recordFiles.Add(fileName);
+                            AppUtil.UpdateResultDict(ref cntDict, tmpCntDict);
+                            AppUtil.UpdateResultDict(ref geoDict, tmpGeoDict);
+                        }
+
+                        ShowInfoInForm($"[INFO] Finish reading records from {fileName} file.");
                     }
                 }
+
+                cts = new();
+                var saveDataTask = AppUtil.SaveDataIntoFile(folderPath, cts.Token);
+                if (await Task.WhenAny(saveDataTask, Task.Delay(fileProcessTimeout)) != saveDataTask)
+                {
+                    cts.Cancel();
+                    ShowInfoInForm($"[ERROR] Timeout while saving middle data info file.");
+                }
+                if (saveDataTask.Exception != null) { throw saveDataTask.Exception; }
+                ShowInfoInForm($"[INFO] Finish saving middle data into file.");
             }
             catch (Exception error)
             {
@@ -323,6 +369,39 @@ namespace WebSiteDownload
             }
 
             EnableButtons();
+        }
+
+        public async static Task SaveResult(string fileName, GDELTEventType type, CsvConfiguration cfg, CancellationToken token)
+        {
+            var resultList = new List<GDELTEventResult>();
+            List<GDELTEventResult> originResultList;
+            if (type == GDELTEventType.CNT)
+            {
+                originResultList = [.. AppUtil.CntDict.Values];
+            }
+            else
+            {
+
+                originResultList = [.. AppUtil.GeoDict.Values];
+            }
+
+            // as required the country pair should be recorded twice
+            foreach (var item in originResultList)
+            {
+                resultList.Add(item);
+                if (item.CountryCode1 != item.CountryCode2)
+                {
+                    var newItem = GDELTEventResult.DeepCopy(item);
+                    if (newItem == null) { continue; }
+                    newItem.CountryCode1 = item.CountryCode2;
+                    newItem.CountryCode2 = item.CountryCode1;
+                    resultList.Add(newItem);
+                }
+            }
+
+            using var outputStream = new StreamWriter(fileName, false);
+            using var csvWriter = new CsvWriter(outputStream, cfg);
+            await csvWriter.WriteRecordsAsync(resultList, token);
         }
 
         private async void button4_Click(object sender, EventArgs e)
@@ -340,49 +419,26 @@ namespace WebSiteDownload
                 // get cfg from class annotation
                 var csvWriterConfig = CsvConfiguration.FromAttributes<GDELTEventResult>(CultureInfo.InvariantCulture);
                 {
-                    var cntResultList = new List<GDELTEventResult>();
-                    var geoResultList = new List<GDELTEventResult>();
-
-                    // as required the country pair should be recorded twice
-                    foreach (var item in AppUtil.GetGDELTEventResultDict(GDELTEventType.CNT).Values)
-                    {
-                        cntResultList.Add(item);
-                        if (item.CountryCode1 != item.CountryCode2)
-                        {
-                            var newItem = GDELTEventResult.DeepCopy(item);
-                            if (newItem == null) { continue; }
-                            newItem.CountryCode1 = item.CountryCode2;
-                            newItem.CountryCode2 = item.CountryCode1;
-                            cntResultList.Add(newItem);
-                        }
-                    }
-                    foreach (var item in AppUtil.GetGDELTEventResultDict(GDELTEventType.GEO).Values)
-                    {
-                        geoResultList.Add(item);
-                        if (item.CountryCode1 != item.CountryCode2)
-                        {
-                            var newItem = GDELTEventResult.DeepCopy(item);
-                            if (newItem == null) { continue; }
-                            newItem.CountryCode1 = item.CountryCode2;
-                            newItem.CountryCode2 = item.CountryCode1;
-                            geoResultList.Add(newItem);
-                        }
-                    }
-
-                    int writeRecordsTimeout = 10000;
+                    int writeRecordsTimeout = 10 * 1000;
                     CancellationTokenSource cts = new();
-                    var csvWriteCntTask = WriteRecordsAsync($"{saveFilePath}.cnt.csv", cntResultList, csvWriterConfig, cts.Token);
-                    var csvWriteGeoTask = WriteRecordsAsync($"{saveFilePath}.geo.csv", geoResultList, csvWriterConfig, cts.Token);
+                    var cntSaveTask = SaveResult($"{saveFilePath}.cnt.csv.bak", GDELTEventType.CNT, csvWriterConfig, cts.Token);
+                    var geoSaveTask = SaveResult($"{saveFilePath}.geo.csv.bak", GDELTEventType.GEO, csvWriterConfig, cts.Token);
 
                     var taskDeny = Task.Delay(writeRecordsTimeout);
-                    if (await Task.WhenAny(csvWriteCntTask, csvWriteGeoTask, taskDeny) == taskDeny)
+                    if (await Task.WhenAny(Task.WhenAll(cntSaveTask, geoSaveTask), taskDeny) == taskDeny)
                     {
                         cts.Cancel();
                         throw new Exception($"[ERROR] Timeout while save process result into {saveFilePath} file.");
                     }
 
-                    if (csvWriteCntTask.Exception != null) { throw csvWriteCntTask.Exception; }
-                    if (csvWriteGeoTask.Exception != null) { throw csvWriteGeoTask.Exception; }
+                    if (cntSaveTask.Exception != null) { throw cntSaveTask.Exception; }
+                    if (geoSaveTask.Exception != null) { throw geoSaveTask.Exception; }
+
+                    if (cntSaveTask.Status == TaskStatus.RanToCompletion && geoSaveTask.Status == TaskStatus.RanToCompletion)
+                    {
+                        if (File.Exists($"{saveFilePath}.cnt.csv.bak")) { File.Move($"{saveFilePath}.cnt.csv.bak", $"{saveFilePath}.cnt.csv", true); }
+                        if (File.Exists($"{saveFilePath}.geo.csv.bak")) { File.Move($"{saveFilePath}.geo.csv.bak", $"{saveFilePath}.geo.csv", true); }
+                    }
                 }
                 ShowInfoInForm($"[INFO] Process result saved to {saveFilePath} success.");
             }
@@ -394,13 +450,6 @@ namespace WebSiteDownload
             }
 
             EnableButtons();
-        }
-        private static async Task WriteRecordsAsync(string filePath, List<GDELTEventResult> resultList, CsvConfiguration cfg, CancellationToken token)
-        {
-            if (File.Exists(filePath)) { File.Move(filePath, $"{filePath}.bak", true); }
-            using var outputStream = new StreamWriter(filePath);
-            using var csvWriter = new CsvWriter(outputStream, cfg);
-            await csvWriter.WriteRecordsAsync(resultList, token);
         }
     }
 

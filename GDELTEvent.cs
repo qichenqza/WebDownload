@@ -27,7 +27,7 @@ namespace WebSiteDownload
         [Index(44)]
         public string Actor2Geo_CountryCode { get; set; } = "";
         [Index(30)]
-        public float GoldsteinScale { get; set; } = 0;
+        public string GoldsteinScale { get; set; } = "";
 
         public string GetHashCode(GDELTEventType eventType)
         {

@@ -28,7 +28,9 @@ namespace WebSiteDownload
 
         public void ProcessGDELTEvent(GDELTEvent item)
         {
-            var scale = item.GoldsteinScale;
+            double scale;
+            try { scale = Convert.ToDouble(item.GoldsteinScale); }
+            catch (Exception) { return; }
 
             this.ScaleCount++;
             this.ScaleSum += scale;
