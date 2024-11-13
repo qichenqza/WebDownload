@@ -174,6 +174,7 @@ namespace WebSiteDownload
                         CancellationTokenSource cts = new();
                         var downloadTask = DownloadFileAsync(httpClient, $"{urlPrefix}/{fileName}", fileStream, cts.Token);
                         if (await Task.WhenAny(downloadTask, Task.Delay(httpTimeout)) != downloadTask) { cts.Cancel(); }
+                        fileStream.Dispose(); fileStream.Close();
 
                         // success download file
                         if (downloadTask.Status == TaskStatus.RanToCompletion)
@@ -285,7 +286,7 @@ namespace WebSiteDownload
                     fileList.Add(filePath);
                 }
 
-                int fileProcessTimeout = 10 * 1000;
+                int fileProcessTimeout = 60 * 1000;
                 CancellationTokenSource cts = new();
                 var loadDataTask = AppUtil.LoadDataFromFile(folderPath, cts.Token);
                 if (await Task.WhenAny(loadDataTask, Task.Delay(fileProcessTimeout)) != loadDataTask)
@@ -335,6 +336,8 @@ namespace WebSiteDownload
                             cts.Cancel();
                             throw new Exception($"[ERROR] Timeout while reading and processing {fileName} file.");
                         }
+                        csvReader.Dispose();
+                        csvFileReader.Dispose(); csvFileReader.Close();
 
                         if (readRecordsTask.Exception != null) { throw readRecordsTask.Exception; }
 
