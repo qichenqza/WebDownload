@@ -8,6 +8,7 @@ namespace WebSiteDownload
         GEO
     }
 
+    //[Delimiter(",")]
     [Delimiter("\t")]
     [HasHeaderRecord(false)]
     [IgnoreBlankLines(true)]
@@ -28,6 +29,8 @@ namespace WebSiteDownload
         public string Actor2Geo_CountryCode { get; set; } = "";
         [Index(30)]
         public string GoldsteinScale { get; set; } = "";
+        [Index(56)]
+        public string DateAdded { get; set; } = "";
 
         public string GetHashCode(GDELTEventType eventType)
         {

@@ -326,6 +326,8 @@ namespace WebSiteDownload
                         {
                             await foreach (var item in csvReader.GetRecordsAsync<GDELTEvent>())
                             {
+                                // change item year to year of DATEADDED
+                                item.Year = item.DateAdded[..4];
                                 ProcessRecords(item, ref tmpCntDict, GDELTEventType.CNT, item.Year);
                                 ProcessRecords(item, ref tmpGeoDict, GDELTEventType.GEO, item.Year);
                             }
